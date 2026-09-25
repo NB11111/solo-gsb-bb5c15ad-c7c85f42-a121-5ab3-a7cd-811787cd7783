@@ -467,6 +467,79 @@ MergeResponse = Annotated[
 ]
 
 
+class FillerItem(BaseModel):
+    """一条待填充素材：唯一 id、正整数时长、非负整数优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="素材唯一标识；不能为空，各素材之间不可重复")
+    duration_ms: int = Field(..., description="素材时长（毫秒），必须为正整数")
+    priority: int = Field(
+        ..., description="填充时长并列时最大化的优先级，必须为非负整数"
+    )
+
+
+class FillerPlanRequest(BaseModel):
+    """POST /fillers/plan 请求体：/compile 同格式口令数组 + 目标通道 / 视野右端 / 素材列表。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="口令数组，格式与 POST /compile 的请求体一致"
+    )
+    channel: str = Field(..., description="填充目标通道标识；只有同通道口令参与空档计算")
+    horizon_end_ms: int = Field(
+        ..., gt=0, description="视野右端（毫秒，不含）；填充只发生在半开区间 [0, horizon_end_ms) 内"
+    )
+    fillers: list[FillerItem] = Field(
+        ...,
+        description="待分配素材列表，至多 12 条；每条素材最多使用一次，也可不使用",
+        max_length=12,
+    )
+
+
+class FillerPlacement(BaseModel):
+    filler_id: str = Field(..., description="入选素材 id")
+    start_ms: int = Field(..., description="素材排布起点（毫秒）")
+    end_ms: int = Field(..., description="素材排布结束时刻（毫秒，半开右端）")
+
+
+class FillerGap(BaseModel):
+    start_ms: int = Field(..., description="空档起点（毫秒）")
+    end_ms: int = Field(..., description="空档结束时刻（毫秒，半开右端）")
+    remaining_ms: int = Field(
+        ..., description="该空档内未被素材填充的剩余时长（毫秒）"
+    )
+    filler_ids: list[str] = Field(
+        ...,
+        description=(
+            "排布在该空档内的素材 id，按 id 升序（即从空档起点起的紧贴排布顺序）"
+        ),
+    )
+
+
+class FillerPlanResponse(BaseModel):
+    channel: str = Field(..., description="填充目标通道标识")
+    horizon_end_ms: int = Field(..., description="视野右端（毫秒，不含）")
+    gaps: list[FillerGap] = Field(
+        ...,
+        description=(
+            "[0, horizon_end_ms) 内目标通道的半开空档，按起点升序，至多 8 个"
+        ),
+    )
+    placements: list[FillerPlacement] = Field(
+        ...,
+        description=(
+            "每条入选素材的起止时刻，按 (空档时间顺序, 空档内 id 升序) 排列"
+        ),
+    )
+    selected_filler_ids: list[str] = Field(
+        ..., description="全部入选素材 id，按 id 升序"
+    )
+    total_filled_ms: int = Field(..., description="入选素材时长总和（填充总时长）")
+    total_priority: int = Field(..., description="入选素材 priority 总和")
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",
@@ -490,6 +563,8 @@ class ErrorBody(BaseModel):
         "NO_FEASIBLE_ROUTING",
         "INTERRUPTION_TARGET_NOT_FOUND",
         "NO_FEASIBLE_INTERRUPTION",
+        "TOO_MANY_FILLERS",
+        "TOO_MANY_GAPS",
     ]
     message: str
     details: dict | None = None
