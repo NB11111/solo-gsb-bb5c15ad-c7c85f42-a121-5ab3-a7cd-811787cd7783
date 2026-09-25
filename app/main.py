@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from .calibrate import calibrate_runs
 from .compiler import CompileError, compile_commands, preview_change
+from .fillers import plan_fillers
 from .interruptions import plan_interruption
 from .merge import merge_versions
 from .rebalance import rebalance_schedule
@@ -20,6 +21,8 @@ from .schemas import (
     CommandItem,
     CompileResponse,
     ErrorBody,
+    FillerPlanRequest,
+    FillerPlanResponse,
     InterruptionPlanRequest,
     InterruptionPlanResponse,
     MergeRequest,
@@ -36,7 +39,7 @@ from .schemas import (
 
 app = FastAPI(
     title="直播导播口令编排 API",
-    version="1.7.0",
+    version="1.8.0",
     description=(
         "接收导播口令数组，解析锚点依赖得到每条口令的起止毫秒时间，"
         "并列出同通道半开区间重叠的冲突 id 对；"
@@ -48,7 +51,9 @@ app = FastAPI(
         "亦可在不改变任何起止时刻的前提下，把口令全局改派到按 id 指定的"
         "备用通道，求改派口令最少的无冲突方案；"
         "还可对 base / left / right 三份口令版本按 id 和字段做无状态三方合并；"
-        "亦可在给定起点窗口内规划临时插播，求撤销口令最少、并列起点最早的方案。"
+        "亦可在给定起点窗口内规划临时插播，求撤销口令最少、并列起点最早的方案；"
+        "还可在目标通道视界内的空档中联合分配填充素材，"
+        "求填充总时长最大、并列优先级最高、再并列 id 序列字典序最小的排布。"
     ),
 )
 
@@ -180,6 +185,23 @@ async def merge(body: MergeRequest) -> dict:
         [item.model_dump() for item in body.base],
         [item.model_dump() for item in body.left],
         [item.model_dump() for item in body.right],
+    )
+
+
+@app.post(
+    "/fillers/plan",
+    response_model=FillerPlanResponse,
+    tags=["fillers"],
+    summary="空档填充：在视界空档内联合分配素材，求填充总时长最大的排布",
+    responses={422: {"model": ErrorBody, "description": "请求非法、素材非法或空档超限"}},
+)
+async def filler_plan(body: FillerPlanRequest) -> dict:
+    # 核心逻辑不依赖 Pydantic，直接喂入 dict 以便独立测试与复用
+    return plan_fillers(
+        [item.model_dump() for item in body.commands],
+        channel=body.channel,
+        horizon_end_ms=body.horizon_end_ms,
+        fillers=[item.model_dump() for item in body.fillers],
     )
 
 

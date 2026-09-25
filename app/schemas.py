@@ -395,6 +395,59 @@ class InterruptionPlanResponse(BaseModel):
     )
 
 
+class FillerItem(BaseModel):
+    """单条填充素材：id、正整数时长、非负整数优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="素材唯一标识；不能为空，各素材之间不可重复")
+    duration_ms: int = Field(..., description="素材时长（毫秒），必须为正整数")
+    priority: int = Field(..., description="素材优先级，必须为非负整数")
+
+
+class FillerPlanRequest(BaseModel):
+    """POST /fillers/plan 请求体：/compile 同格式口令数组 + 目标通道 / 视界 / 素材列表。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="现有口令数组，格式与 POST /compile 的请求体一致"
+    )
+    channel: str = Field(
+        ..., description="目标通道标识；只有同通道口令参与占用计算，不能为空"
+    )
+    horizon_end_ms: int = Field(
+        ...,
+        description="规划视界结束时刻（毫秒），必须为正数；规划范围为 [0, horizon_end_ms)",
+    )
+    fillers: list[FillerItem] = Field(
+        ...,
+        description="填充素材列表，至多 12 条；每条素材最多使用一次",
+        max_length=12,
+    )
+
+
+class FillerPlacement(BaseModel):
+    id: str = Field(..., description="入选素材 id")
+    start_ms: int = Field(..., description="排布起点（毫秒）")
+    end_ms: int = Field(..., description="排布结束时刻（毫秒）")
+
+
+class FillerGap(BaseModel):
+    start_ms: int = Field(..., description="空档起点（毫秒，半开区间左端）")
+    end_ms: int = Field(..., description="空档结束时刻（毫秒，半开区间右端）")
+    remaining_ms: int = Field(..., description="填充后空档剩余时长（毫秒）")
+
+
+class FillerPlanResponse(BaseModel):
+    placements: list[FillerPlacement] = Field(
+        ..., description="入选素材的排布，按空档时间顺序、空档内按 id 升序"
+    )
+    gaps: list[FillerGap] = Field(
+        ..., description="全部空档及其填充后的剩余时长，按时间顺序"
+    )
+
+
 class MergeRequest(BaseModel):
     """POST /versions/merge 请求体：base / left / right 三份 /compile 同格式口令数组。"""
 
@@ -490,6 +543,10 @@ class ErrorBody(BaseModel):
         "NO_FEASIBLE_ROUTING",
         "INTERRUPTION_TARGET_NOT_FOUND",
         "NO_FEASIBLE_INTERRUPTION",
+        "INVALID_HORIZON",
+        "INVALID_PRIORITY",
+        "TOO_MANY_FILLERS",
+        "TOO_MANY_GAPS",
     ]
     message: str
     details: dict | None = None

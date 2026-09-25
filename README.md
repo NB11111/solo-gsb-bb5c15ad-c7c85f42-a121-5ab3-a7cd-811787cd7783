@@ -10,7 +10,9 @@
 求改派口令最少、并列时通道名序列字典序最小的无冲突方案；亦可对
 base / left / right 三份口令版本按 id 和字段做无状态三方合并，无分歧时直接
 复用编排器校验合并结果；还可在给定起点窗口内为指定通道规划一条临时插播，
-求需要撤销的现有口令最少、并列时起点最早的插播方案。
+求需要撤销的现有口令最少、并列时起点最早的插播方案；还可在目标通道
+`[0, horizon_end_ms)` 的空档内联合分配至多 12 条填充素材，求填充总时长最大、
+并列时优先级总和最大、再并列时素材 id 序列字典序最小的排布。
 
 - 在线接口文档（Swagger UI）：<http://localhost:8000/docs>
 - 健康检查：`GET /health`
@@ -22,6 +24,7 @@ base / left / right 三份口令版本按 id 和字段做无状态三方合并�
 - 通道改派接口：`POST /routing/assign`
 - 口令三方合并接口：`POST /versions/merge`
 - 临时插播规划接口：`POST /interruptions/plan`
+- 空档填充规划接口：`POST /fillers/plan`
 
 ## 一条命令启动
 
@@ -1106,6 +1109,108 @@ curl -s http://localhost:8000/interruptions/plan \
 口令 id（按 id 升序），便于调用方定位阻塞来源。若把窗口右端放宽到 1500，
 则起点 1500 与所有口令首尾相接，`cancelled_ids` 为空即可成功。
 
+## 接口约定：`POST /fillers/plan`
+
+在节目空档中自动排入填充素材（备播片、垫片等）：现有口令先复用 `POST /compile`
+的编排器校验并解析起止时刻，取**目标通道**口令的占用区间裁剪到
+`[0, horizon_end_ms)` 并求并集，其补集即为该通道的**半开空档**（至多 8 个）；
+随后把至多 12 条素材在全部空档间**联合分配**（每条素材最多使用一次），
+求填充效果最好的排布。
+
+请求体为一个对象：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `commands` | array | 是 | 现有口令数组，每一项的字段与 `POST /compile` 的请求体完全一致 |
+| `channel` | string | 是 | 目标通道标识；只有同通道口令参与占用计算，不能为空 |
+| `horizon_end_ms` | integer | 是 | 规划视界结束时刻（毫秒），必须为正数；规划范围为半开区间 `[0, horizon_end_ms)` |
+| `fillers` | array | 是 | 填充素材列表，**至多 12 条** |
+
+`fillers` 每一项字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 素材唯一 id；不能为空，各素材之间不可重复 |
+| `duration_ms` | integer | 是 | 素材时长（毫秒），必须为正整数 |
+| `priority` | integer | 是 | 素材优先级，必须为非负整数 |
+
+空档与分配规则：
+
+- 目标通道口令的半开区间 `[start_ms, end_ms)` 先裁剪到 `[0, horizon_end_ms)`
+  （结束时刻晚于视界的按视界截断，起点晚于视界的不参与），再求并集；
+  `[0, horizon_end_ms)` 减去并集即得空档。空档数**超过 8 个**时返回
+  `422` + `TOO_MANY_GAPS`。
+- 每条素材最多使用一次；同一空档内素材时长之和不得超过空档长度；素材在
+  **全部空档间联合分配**（而不是逐个空档独立贪心），保证全局最优。
+- 目标依次为：① **填充总时长**（全部入选素材时长之和）最大；② 并列时
+  **priority 总和**最大；③ 再并列时「按空档时间顺序、空档内按 id 升序展开」
+  的素材 id 序列**字典序最小**。
+- 各空档内素材按 **id 升序**从空档起点**紧贴排布**（前一条的结束时刻即后一条的
+  起点），空档剩余时长集中留在空档末尾。
+- 请求无状态、不落数据，服务端不会修改 `commands` 与 `fillers`。
+
+响应字段：
+
+- `placements`：入选素材的排布，按空档时间顺序、空档内按 id 升序；每项含
+  `id`、`start_ms`、`end_ms`。
+- `gaps`：全部空档（含未放入素材的），按时间顺序；每项含 `start_ms`、`end_ms`
+  （半开区间）与填充后的 `remaining_ms`。
+
+### 请求示例（跨空档联合分配）
+
+口令 `p` 占用 `main` 通道的 `[5, 6)`，视界 12 ms 内产生空档 `[0, 5)`（容量 5）
+与 `[6, 12)`（容量 6）。三条素材总时长 10：唯一装下全部素材的划分是
+`{a}` 进第一个空档、`{b, c}` 进第二个空档：
+
+```bash
+curl -s http://localhost:8000/fillers/plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "p", "channel": "main", "anchor": "START", "offset_ms": 5, "duration_ms": 1}
+    ],
+    "channel": "main",
+    "horizon_end_ms": 12,
+    "fillers": [
+      {"id": "a", "duration_ms": 4, "priority": 1},
+      {"id": "b", "duration_ms": 3, "priority": 2},
+      {"id": "c", "duration_ms": 3, "priority": 0}
+    ]
+  }'
+```
+
+响应示例（`200`）：
+
+```json
+{
+  "placements": [
+    {"id": "a", "start_ms": 0, "end_ms": 4},
+    {"id": "b", "start_ms": 6, "end_ms": 9},
+    {"id": "c", "start_ms": 9, "end_ms": 12}
+  ],
+  "gaps": [
+    {"start_ms": 0, "end_ms": 5, "remaining_ms": 1},
+    {"start_ms": 6, "end_ms": 12, "remaining_ms": 0}
+  ]
+}
+```
+
+若两条时长 6 的素材 `a`、`b` 竞争两个容量均为 6 的空档，`{a}|{b}` 与 `{b}|{a}`
+的填充总时长与优先级总和都相同，按第三目标取 id 序列 `[a, b]` 字典序更小的
+方案：`a` 进靠前的空档、`b` 进靠后的空档。
+
+### 请求示例（空档超限，422）
+
+8 条口令把视界切成 9 个空档时返回 `422` + `TOO_MANY_GAPS`：
+
+```json
+{
+  "code": "TOO_MANY_GAPS",
+  "message": "通道 main 在 [0, 20) 内的空档数 9 超过上限 8",
+  "details": { "channel": "main", "count": 9, "limit": 8 }
+}
+```
+
 ## 错误处理
 
 所有业务错误均返回 HTTP `422`，响应体统一为：
@@ -1143,6 +1248,10 @@ curl -s http://localhost:8000/interruptions/plan \
 | `NO_FEASIBLE_ROUTING` | 仅 `POST /routing/assign`：不存在满足时间重叠约束的无冲突方案，`details.reason` 为 `FIXED_OVERLAP` / `NO_AVAILABLE_CHANNEL` / `INSUFFICIENT_CHANNEL_CAPACITY` |
 | `INTERRUPTION_TARGET_NOT_FOUND` | 仅 `POST /interruptions/plan`：`cancellable_ids` 引用了不存在于 `commands` 的口令 id |
 | `NO_FEASIBLE_INTERRUPTION` | 仅 `POST /interruptions/plan`：起点窗口内每个可行起点的撤销闭包都含不可撤销口令，`details.reason=UNREVOCABLE_OVERLAP`，`details.blocking_ids` 为阻塞口令 |
+| `INVALID_HORIZON` | 仅 `POST /fillers/plan`：`horizon_end_ms` 不是正数 |
+| `INVALID_PRIORITY` | 仅 `POST /fillers/plan`：素材 `priority` 为负数 |
+| `TOO_MANY_FILLERS` | 仅直接调用核心逻辑时：素材超过 12 条（HTTP 层由请求结构校验提前返回 `INVALID_REQUEST`） |
+| `TOO_MANY_GAPS` | 仅 `POST /fillers/plan`：目标通道在 `[0, horizon_end_ms)` 内的空档超过 8 个，`details.count` / `details.limit` 给出实际数与上限 |
 
 > `POST /versions/merge` 的字段级分歧不是错误：无论是否合并成功都返回 HTTP `200`，
 > 由响应体的 `status`（`merged` / `diverged`）区分；仅版本内部重复 id
@@ -1235,6 +1344,23 @@ curl -s http://localhost:8000/interruptions/plan \
   `timeline` 为剩余口令的 `/compile` 原解析结果，不含插播口令本身。
 - 请求无状态、不落数据；服务端不会修改 `commands` 与 `cancellable_ids`。
 
+`POST /fillers/plan` 额外约定：
+
+- `commands` 的全部校验与错误码和 `/compile` 完全一致（含重复 id、缺失锚点、
+  依赖环、负起点等），且编排非法时优先返回编排错误码。
+- `channel` 为空返回 `INVALID_CHANNEL`；`horizon_end_ms` 非正返回
+  `INVALID_HORIZON`。
+- 素材 `id` 为空返回 `INVALID_ID`；重复 `id` 返回 `DUPLICATE_ID`；
+  `duration_ms` 非正返回 `INVALID_DURATION`；`priority` 为负返回
+  `INVALID_PRIORITY`。
+- 素材超过 12 条、字段缺失 / 类型错误 / 多余字段等结构问题返回
+  `INVALID_REQUEST`（直接调用核心逻辑时素材超限返回 `TOO_MANY_FILLERS`）。
+- 空档超过 8 个返回 `TOO_MANY_GAPS`（`details.count` / `details.limit`
+  给出实际空档数与上限）。
+- 分配按「空档 × 素材子集」动态规划求解（素材 ≤ 12、空档 ≤ 8），
+  第三目标的 id 序列字典序经整数编码参与比较，不逐方案枚举。
+- 请求无状态、不落数据；服务端不会修改 `commands` 与 `fillers`。
+
 ## 本地开发（不使用 Docker）
 
 要求 Python 3.11+：
@@ -1248,7 +1374,8 @@ uvicorn app.main:app --reload --port 8000
 实播对账逻辑位于 `app/reconcile.py`，时钟校准逻辑位于 `app/calibrate.py`，
 通道改派逻辑位于 `app/routing.py`，
 口令三方合并逻辑位于 `app/merge.py`，临时插播规划逻辑位于
-`app/interruptions.py`，均仅使用标准库，可直接运行单元测试：
+`app/interruptions.py`，空档填充规划逻辑位于 `app/fillers.py`，
+均仅使用标准库，可直接运行单元测试：
 
 ```bash
 python3 -m unittest discover -s tests
@@ -1262,16 +1389,18 @@ python3 -m unittest discover -s tests
 │   ├── __init__.py
 │   ├── calibrate.py       # 纯标准库的时钟校准（候选偏移区间扫描 + 一致数最多裁决）
 │   ├── compiler.py        # 纯标准库的依赖解析 / 时间计算 / 冲突检测
+│   ├── fillers.py         # 纯标准库的空档填充规划（空档并集 + 子集 DP 联合分配）
 │   ├── interruptions.py   # 纯标准库的临时插播规划（锚点森林欧拉序 + 线段树事件扫描）
 │   ├── merge.py           # 纯标准库的口令三方合并（按 id、字段合并 + 复用编排器校验）
 │   ├── rebalance.py       # 纯标准库的节目单延误分摊（固定点切窗 + 余量比例分摊）
 │   ├── reconcile.py       # 纯标准库的实播对账（通道内保序一对一匹配 + 最小罚分 DP）
 │   ├── routing.py         # 纯标准库的通道改派（位掩码分支限界：最少改派 + 字典序裁决）
 │   ├── schemas.py         # Pydantic 请求与响应模型
-│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/health、统一错误处理）
+│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/fillers/plan、/health、统一错误处理）
 ├── tests/
 │   ├── test_calibrate.py      # 时钟校准核心逻辑单元测试（标准库 unittest）
 │   ├── test_compiler.py       # 编排核心逻辑单元测试（标准库 unittest）
+│   ├── test_fillers.py        # 空档填充规划核心逻辑单元测试（含暴力枚举对照 fuzz）
 │   ├── test_interruptions.py  # 临时插播规划核心逻辑单元测试（含逐毫秒暴力对照 fuzz）
 │   ├── test_merge.py          # 三方合并核心逻辑单元测试（标准库 unittest）
 │   ├── test_rebalance.py      # 延误分摊核心逻辑单元测试（标准库 unittest）
